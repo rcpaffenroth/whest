@@ -10,6 +10,7 @@ requires-python = ">=3.10"
 license = "MIT"
 dependencies = [
     "flopscope>=0.8.0rc5,<0.9.0",
+    "scipy>=1.15.3",
     "whestbench>=0.12.0rc3,<0.13.0",
 ]
 

@@ -9,17 +9,56 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import math
 from pathlib import Path
 
 import flopscope.numpy as fnp
 from whestbench import MLP, BaseEstimator
 
+# Fraction of the FLOP budget to spend. The score multiplier is max(0.1, C/B),
+# so it floors at 0.1 for any usage <= 10% of budget: within that band more
+# points strictly lowers MSE at no multiplier cost, so we push toward the floor,
+# leaving a small margin for residual/QR overhead. (Even slightly over 10% is
+# only a mild, linear multiplier penalty -- not the catastrophic budget-exceed.)
+TARGET_FRACTION = 0.095
+
 
 class Estimator(BaseEstimator):
+    """Randomized unscented-transform (degree-3 spherical-radial cubature) estimator.
+
+    Represents the input N(0, I) by the deterministic sigma-point set
+    +- sqrt(width) e_i (which matches its mean and covariance exactly), turned by
+    several Haar-random rotations, then propagates those points through the MLP and
+    averages per layer. See experiments/whest_ut.py for the plain-numpy exposition.
+    """
+
     def predict(self, mlp: MLP, budget: int) -> fnp.ndarray:
-        # TODO: replace this all-zeros baseline with your idea.
-        _ = budget
-        return fnp.zeros((mlp.depth, mlp.width))
+        width, depth = mlp.width, mlp.depth
+        rng = fnp.random.default_rng(mlp.seed)
+
+        # Cost is dominated by the batched matmuls: 2*width points per rotation,
+        # each pushed through depth (width x width) layers. One (P, width)@(width,
+        # width) matmul is ~2*P*width^2 FLOPs, so one rotation (P = 2*width) costs
+        # ~4*depth*width^3. Take as many rotations as the budget fraction allows.
+        cost_per_rotation = 4 * depth * width**3
+        rotations = max(1, int(TARGET_FRACTION * budget / cost_per_rotation))
+
+        # --- randomized UT sigma points for N(0, I): +- sqrt(width) e_i, rotated ---
+        radius = math.sqrt(width)
+        blocks = []
+        for _ in range(rotations):
+            Q, _ = fnp.linalg.qr(rng.standard_normal((width, width)))  # Q: orthonormal columns
+            axes = radius * Q.T                                        # rows: directions at radius sqrt(width)
+            blocks += [axes, -axes]                                    # the +- symmetric set
+        X = fnp.concatenate(blocks, axis=0)                           # (2*width*rotations, width)
+
+        # --- propagate the sigma points and average each layer (equal weights) ---
+        h = X
+        means = []
+        for w in mlp.weights:
+            h = fnp.maximum(h @ w, 0.0)          # z = ReLU(W^T x), batched over sigma points
+            means.append(h.mean(axis=0))         # UT estimate of E[z] at this layer
+        return fnp.stack(means, axis=0)          # (depth, width)
 
 
 def _load_baseline(name: str) -> type[BaseEstimator]:
