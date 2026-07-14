@@ -29,3 +29,4 @@ Thumbs.db
 
 # corrector feature cache (regenerated from HF MLPs)
 experiments/corrector/_cache/
+experiments/*.pt
