@@ -26,3 +26,6 @@ Thumbs.db
 
 # Internal process docs (specs, plans, scratch) — not for participant repo.
 .aicrowd/
+
+# corrector feature cache (regenerated from HF MLPs)
+experiments/corrector/_cache/

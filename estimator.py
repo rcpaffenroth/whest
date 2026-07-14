@@ -43,8 +43,17 @@ class Estimator(BaseEstimator):
         cost_per_rotation = 4 * depth * width**3
         rotations = max(1, int(TARGET_FRACTION * budget / cost_per_rotation))
 
-        # --- randomized UT sigma points for N(0, I): +- sqrt(width) e_i, rotated ---
-        radius = math.sqrt(width)
+        # --- randomized UT sigma points for N(0, I): +- radius * e_i, rotated ---
+        # Radius is E||x|| for x ~ N(0, I_width), NOT sqrt(width). ReLU is positively
+        # homogeneous of degree 1, so the per-neuron mean is set by the FIRST radial
+        # moment E||x|| = sqrt(2) Gamma((w+1)/2)/Gamma(w/2); sqrt(width) only matches
+        # E[||x||^2] = width. A single shell at sqrt(width) therefore overestimates by
+        # sqrt(width)/E||x|| ~ 1 + 1/(4 width), a systematic bias that compounds with
+        # depth. Using E||x|| removes it at the same point budget. See
+        # experiments/whest_radius.py (final-layer bias floor 1.9e-6 -> 2.4e-7).
+        radius = math.sqrt(2.0) * math.exp(
+            math.lgamma((width + 1) / 2) - math.lgamma(width / 2)
+        )
         blocks = []
         for _ in range(rotations):
             Q, _ = fnp.linalg.qr(rng.standard_normal((width, width)))  # Q: orthonormal columns

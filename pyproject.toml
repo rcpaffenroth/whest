@@ -2,6 +2,12 @@
 requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
+# Flat-layout app: the only installable modules are the two root files. Declaring them
+# explicitly stops setuptools auto-discovery from choking on assets/ and experiments/
+# (which are data/research dirs, not packages to install).
+[tool.setuptools]
+py-modules = ["estimator", "local_engine"]
+
 [project]
 name = "whest-starterkit"
 version = "0.1.0"
