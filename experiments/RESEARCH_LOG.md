@@ -1,4 +1,4 @@
-# The ARC White-Box Challenge: the answer is a deterministic function of the weights
+# The ARC White-Box Challenge: F(W) is a dynamical system, learned from the weights
 
 Research log for our work on the
 [ARC White-Box Estimation Challenge 2026](https://www.aicrowd.com/challenges/arc-white-box-estimation-challenge-2026).
@@ -8,65 +8,75 @@ preserved).
 
 ---
 
-## 0. The central insight — read this first
+## 0. Philosophy & standing orders — read this first, do not re-litigate
 
-**The quantity we must predict is a deterministic function of the weights.**
+This section exists because RCP has had the **same conversation with multiple
+LLMs** and is tired of it. Internalize it before proposing anything. It is written
+in certain terms on purpose.
 
-The target is `μ = E_{x~N(0,I)}[z_L]`, the per-neuron mean activation. Once the
-weights `W = (W_0,…,W_{L-1})` are fixed, the input distribution is *integrated
-out* — there is no randomness left. So
+**The framing: this is a dynamical system, and we learn it from the weights.**
+The forward pass `z_{l+1} = ReLU(W_lᵀ z_l)` is a **random dynamical system** — a
+product of random matrices acting on a distribution. The target
+`μ = F(W) = E_{x~N(0,I)}[z_L]` is a *deterministic functional of that system's
+terminal distribution* (the input is integrated out). `F`'s heavy tail across
+random `W` is **not noise** — it is the **large-deviation statistics of the
+finite-time Lyapunov exponent** (some `W` sit in the expanding/chaotic regime,
+some contracting). **The research goal is to LEARN `F(W)` directly from `W`**,
+treating a recurrent model that scans `W_1,…,W_L` as a *learned simulator of the
+distribution's dynamics*. That is the interesting problem, and the one RCP cares
+about (dynamical systems). Everything else is scaffolding.
 
-```
-μ = F(W)          — a fixed, deterministic function of the weights.
-```
+**Standing orders:**
 
-A genie holding `W` with unlimited compute computes `F(W)` exactly and gets
-**zero error**. The competition is therefore not "estimate a random quantity"; it
-is **"compute the deterministic function `F(W)` as cheaply as possible."** Every
-method here is just a different cheap approximation of the *same* `F(W)`.
+1. **Learn from `W` with recurrent / sequence models — this is the priority.** The
+   layers are an ordered sequence; an RNN/LSTM/GRU (or a structured recurrence)
+   over them is the native tool. Push it *hard* — scale data and architecture —
+   before concluding anything about what is or isn't learnable.
 
-This single fact reorganizes everything, and earlier versions of this log missed
-it. Three consequences to keep in mind throughout:
+2. **Sampling (MC/UT/QMC) and analytic moment-propagation are EFFECTIVE BUT
+   BORING — a red herring for the research goal.** They are cheap only because the
+   FLOP budget is generous, not because they are the point. The unscented
+   transform is merely our current *leaderboard submission* (§7): a solved
+   baseline, not a research frontier. **When asked about learning from `W`, do not
+   reach for sampling/moments and pronounce the ML route unnecessary or dead.**
+   That reflex is the exact thing RCP is tired of.
 
-1. **Two classes of method, not one.**
-   - *Sampling / quadrature* (Monte-Carlo, UT, LHS, Sobol): approximate the
-     integral `F(W)=∫ z_L dN(0,I)` by pushing points through the network. Every
-     such method has an **irreducible sampling-variance floor** at a fixed point
-     budget — it is estimating a deterministic number with a random rule.
-   - *Analytic / white-box* (mean- and covariance-propagation, and learned
-     refinements of them): compute `F(W)` **directly from the weights** by
-     propagating the distribution's moments through the layers. **No sampling,
-     no variance floor**
+3. **Never declare `F(W)` (or any target) "unlearnable" from one architecture or
+   one data scale.** Escalate architecture and data first. This has already been
+   wrong *twice in a single session:*
 
-2. **The residual of any estimator is also deterministic in `W`.** For a base
-   estimator `Ê(W)`, the error `R(W) = F(W) − Ê(W)` is a fixed function of the
-   weights. A *corrector* that learns `R(W)` and adds it back can, in principle,
-   reach zero error — **provided `R(W)` is a cheaper function than `F(W)` itself.**
-   That is the whole bet of a correction approach: you stand on a base estimator's
-   shoulders and learn only the (hopefully smooth, low-complexity) residual, not
-   `F` from scratch. Whether `R(W)` is cheaply representable within the FLOP
-   budget is *the* open research question — and where structured-sparse models
-   (block-diagonal + permutation, "Monarch") earn their place.
+   | claim an LLM made | what actually happened |
+   |---|---|
+   | "flat MLP on flatten(W) plateaus at R²≈0.26 → `F` isn't black-box-learnable; a representation limit" | **wrong.** A GRU over the *ordered layers* → R²=0.69; an LSTM → **0.86**; and it *climbs with data* (0.48→0.65→0.83 at 100k→300k→600k nets, still rising). A plateau of one architecture ≠ a property of the problem. |
+   | "the residual `R=F−UT` is unlearnable from `W`" | half-right, and again the fix was *more information, not surrender*: `W` alone → `R` gives R²≈0.03 (5% of UT's error), but feeding the RNN the **per-layer UT moments** as input takes it to R²=0.19 (20% removed, §10). The residual is learnable given the right features. |
 
-3. **Sampling-variance is a wall on *samplers*, not on the problem.** A recurring
-   error below was to prove "no isotropic sampler can do better here" and conclude
-   "nothing can do better." Those are different statements. The sampling floor
-   says nothing about the analytic route, which has no variance at all. The
-   leaderboard confirms this by a floor argument: any pure sampler bottoms out at
-   its own directional variance, so scores well below that floor can only come
-   from **exploiting `W` directly** (analytic moment propagation) — i.e. from
-   leaving the sampling class.
+4. **The likely endgame is a HYBRID — a learned `G(W-features, cheap-estimator-features)`** —
+   not pure learning-from-`W` *or* pure sampling. What is deprioritized is only the *naive
+   additive* corrector `F ≈ UT + learned(R)` and the *hand-crafted* moment-closure (§9):
+   moment-propagation with a patch. But a model that *jointly* learns from the weights **and**
+   cheap estimator outputs (UT per-layer moments as input features) is very much live — it is
+   exactly the `W+UT` experiment (§10), and feeding UT features unlocked the residual the
+   additive form could not. **Use cheap sampling/moments as *features* for a weight-learner,
+   never as the answer.**
 
-**How to read the rest of this log.** §2–§6 characterize the *sampling class* and
-find its best member (a randomized unscented transform, our current champion).
-That work is correct and useful — but it is a statement about one class of
-methods, and its "we are near-optimal" conclusions are bounded by the sampling
-floor, not by `F(W)`. §7 is the submission record. §8 is the white-box structure:
-a probe shows the answer is a scalar function of one **basis-aligned** weight
-statistic, that the bottleneck is **moment propagation across depth** (not the
-final nonlinearity), and — corrected here — that this is precisely the analytic
-route with the higher ceiling. §9 sets the direction: a learned corrector of the
-deterministic moment recursion.
+**Communicating with RCP.** RCP is an applied mathematician fluent in linear
+algebra (SVD-native). Explain architectures and ideas in **linear-algebra terms**
+— matrices, bases, projections, orthogonal/permutation-group actions, Hadamard and
+matrix products — and **minimize per-"neuron" language**. E.g. the equivariant
+model's state is *a `d×c` matrix that co-transforms with the activation vector
+under the layer's basis permutation* (§10.1), not "per-neuron features."
+
+**Setup facts that bite (they are dynamical-systems artifacts).** Width-2 depth-32
+ReLU nets are **100% dead** (`F≡0`): the surviving input fraction halves every ~2
+layers, and because ReLU is positively homogeneous this is *scale-invariant* — no
+initialization fixes it; **width** is what keeps deep ReLU nets alive. The toy
+therefore uses **width 8, depth 8** (`whest_toy.py`, `F: R⁵¹²→R⁸`), and the
+recurrent experiments live in `rnn_harness.py`.
+
+**How to read the rest.** §1 is the competition spec. §2–§8 are the **sampling +
+analytic record** — correct, useful, the source of the current champion
+submission, but *the boring part*: skim it, don't innovate there. §9 is the
+deprioritized moment-corrector idea. **§10 is the live direction and its results.**
 
 ---
 
@@ -476,35 +486,151 @@ recursion** (§9).
 
 ---
 
-## 9. Open direction — a learned corrector of the deterministic moment recursion
+## 9. Deprioritized — learned corrector of the moment recursion (kept for the record)
 
-Everything above converges on one program. `μ = F(W)` is deterministic (§0); the
-answer is a per-neuron scalar function of a **basis-aligned** weight statistic
-(§8.3); the true bottleneck is **closure drift in the moment recursion across
-depth** (§8.3.2), whose ceiling is `≈ 0` (R²≈1.0 with accurate moments). So:
+**RCP finds moment/corrector methods boring; this is NOT the direction (see §0).**
+The idea: learn the residual of the deterministic moment recursion — its error is
+closure drift across depth (§8.3), deterministic, ceiling ≈0. Attractive on paper
+(no sampling noise; per-neuron equivariant readout per §8.4; a Monarch-sparse map
+for FLOP-cheap capacity). But it is moment-propagation with a learned patch — the
+boring class. Note the *additive* form (learn `F−UT`) fails from `W` alone; but feeding UT
+moments as *features* to a weight-learner does help (§10) — so the live version is the hybrid
+`G(W,UT)` of §0.4, not this hand-crafted closure. Recorded so the next reader doesn't
+re-derive it. (Also deferred, lower ceiling: an even-degree-≥4 control variate for the UT,
+§4.1/§4.3.)
 
-- **Base estimator: the deterministic moment recursion**, not (only) the sampler.
-  Its residual `R(W) = F(W) − Ê(W)` is deterministic — **no irreducible sampling
-  noise** — hence *fully* learnable, unlike a corrector on the UT (whose residual is
-  mostly variance). This is the higher-ceiling target.
-- **Corrector form: a per-layer recurrence with weight-dependence.** A learned map
-  `g` that refines the propagated moments layer-to-layer, reading each layer's
-  weights `W_k`, with a per-neuron equivariant readout (§8.4). This is a *learned
-  moment-closure*: the closed form has no clean expression past low order, so we
-  learn the correction the crude gain-rule misses. The hidden state carries the
-  higher-moment information the Gaussian closure discards.
-- **Why weight-dependence is the substrate, not a garnish (§0).** `F(W)` is a
-  function of `W`; the residual is too; a genie with `W` reaches zero error. The
-  research question is only whether `R(W)` is **cheaply** representable within the
-  FLOP budget — which is why the map should be a large but **structured-sparse**
-  (block-diagonal + permutation, "Monarch") function of the weights: high capacity
-  at low FLOP cost. An ablation with weight-dependence switched off is the *control*
-  that measures what the weights are worth — expected weak, not a gate.
+---
 
-Design notes and the running argument live in `experiments/tasks/RCP_ideas_v1.md`;
-the bias/variance and radius experiments that grounded the reframe are
-`whest_bias_variance.py` and `whest_radius.py`.
+## 10. The live direction — learn F(W) directly with recurrent models
 
-*Deferred sampler-side idea (lower ceiling): an even-degree-≥4 control variate for
-the UT — the one control not redundant with its symmetry (§4.1, §4.3). Kept for
-completeness; the analytic route above is the priority.*
+The forward pass is a random dynamical system (§0); an RNN scanning `W_1,…,W_L` is
+a learned simulator of it. Harness: **`rnn_harness.py`** — one `make_core` factory
+swaps `nn.RNN/LSTM/GRU`; `W` is fed as `K` layer-tokens of `d²` features; target
+`log1p(F)`; R² reported in log-space on leakage-proof val/test; 600k-network pool
+cached. Toy geometry `whest_toy.py`, width 8 / depth 8. Design notes:
+`tasks/RCP-ideas-v2.md`.
+
+**Results so far (held-out R², log-space):**
+
+- **Architecture ≫ size.** Flat MLP on flatten(W) tops out ≈0.26; a residual MLP
+  *climbs* with data (→0.36 at 600k, no plateau); respecting the ordered layers
+  jumps far higher. *The flat-MLP "plateau" is not a property of `F`.*
+- **Recurrent comparison** (600k nets, hidden 256, 2 layers): **LSTM 0.863 > GRU
+  0.827 > vanilla RNN 0.663** (params 858k / 644k / 216k — capacity confounded
+  with gating; param-matched sweep still TODO).
+- **Data scaling (GRU): 0.48 → 0.65 → 0.83** at 100k → 300k → 600k, **still
+  rising.** Learning from `W` is data-limited here, not capability-limited.
+- **UT is a superb *feature*; the hybrid beats additive correction** (`exp_ut_features.py`).
+  One **fixed** 16-point UT (no rotations → deterministic label) explains **99.4%** of Var(F).
+  Feed the RNN the per-layer UT moments (mean + cov-diag) as input: `UT`-features→`F`
+  R²=**0.996**; `W+UT`→`F` 0.995 (≈ `UT` — raw `W` adds little *at 300k*); and the residual,
+  dead from `W` alone (0.03), becomes learnable given UT features (**0.19**, 20% of UT's error
+  removed). This is the hybrid `G(W,UT)` of §0.4; the additive `F−UT` was the wrong form.
+- **Width → the RMT limit changes the problem** (`exp_width_scale.py`, depth 8, `d`=8/16/32).
+  Concentration confirmed (mean `F` 0.30→0.42→0.49 → mean-field 0.564; tail p99/med 9.6→2.7).
+  **`UT`-features → sufficiency** (R² 0.995→0.998) while **`R²(W)` *falls*** at fixed data
+  (0.46→0.31→0.27): the raw-weight token is `d²`-dim and lacks neuron symmetry.
+- **But raw-`W` is data-limited, not dead** (`exp_w_at_scale.py`). Width 8: `R²(W)` climbs
+  0.60→0.85→**0.97** at 300k→600k→1.2M, chasing UT's 0.995 — the `W`-vs-`UT` gap is a *data*
+  gap. Width 32: stalls (0.27→0.30 to 400k) — data alone doesn't rescue it → the missing
+  ingredient is Rung 1.
+- **Equivariance breaks the width-32 wall** (`equivariant.py`, §10.1; width 32, N=400k). The
+  matrix-state equivariant model reaches **R²(log)=0.982 with 7.4k params** vs the flat LSTM's
+  0.27–0.30 with 858k — 30–40× fewer params, 3× R², from raw `W`. It is effectively a *learned
+  moment-propagator*. Sweep + 3-seed confirm (`equiv_confirm.py`): **residual row-cell wins,
+  R²=0.981±0.000, 7.4k params — gating is unneeded/harmful because `W_lH` already carries the state**
+  (flips the flat-model "gating helps"; gru/mean 0.977±0.001 close 2nd). **Mean-pool suffices**: for
+  residual mean=mean2 (both 0.981); for gru, mean 0.977 ≫ mean2 0.852 — the 2nd-moment (`q_l`) pool
+  never helps, **contradicting §10.2's prediction** (the row-cell reconstructs `q_l` from the mean
+  channel). attention (0.50) and lstm (0.44) hurt; hybrid `W+UT` 0.92 (pure-`W` already near
+  UT-sufficiency, so UT adds little). Winner: **residual + mean pool, pure-W**.
+- **It scales to competition width — R² RISES** (`exp_width_scale_equiv.py`, depth 8, residual/mean,
+  **5.3k params at EVERY width**): R²(log) **0.983 → 0.991 → 0.995 → 0.993** at d = 32/64/128/**256**,
+  while N *shrinks* 400k→200k→50k→**12k**. Concentration makes the problem cleaner toward the
+  RMT/competition regime and the width-independent equivariant model exploits it: **at competition
+  width 256, R²=0.993 from 12k nets with a 5.3k-param model.** The wall is gone — learning-`F`-from-`W`
+  works at scale, dense (12–24 min/width, Monarch not yet needed).
+- **Depth-scaling softens but holds** (`exp_depth_scale_equiv.py`, width 64, residual/mean, 5.3k params
+  at every depth): R²(log) 0.991 → 0.987 → 0.981 → **0.951** at K = 8/16/24/**32**, N shrinking
+  200k→50k. Unlike width (which *raised* R²), depth *lowers* it — depth is where Gaussian-closure drift
+  and inter-layer correlations compound (§1, §8.3). **At competition depth 32: R²=0.951** (50k nets,
+  5.3k params). Confounded with the N drop (4× less data at K=32) → partly data-limited; untested
+  whether more data recovers it. *Remaining gaps: the JOINT competition geometry (width 256 AND depth
+  32) is untested — storage is `N·K·d²`, this is where Monarch/more-data enters; the two 1D sweeps
+  bracket it ~0.95–0.99, depth being the limiting axis. And R² is log-space, not the final-layer MSE.*
+
+**The ladder to climb (increasing dynamical-systems structure):**
+1. **Exhaust the generic recurrent model** — scale data (1–2M), bigger/deeper/
+   bidirectional, tune. Find its ceiling; nobody has.
+2. **Neuron-permutation equivariance — now the critical path** (the width-32 wall above). The
+   `d` hidden neurons are exchangeable, so `F` is *equivariant* to relabeling them — a
+   per-boundary gauge symmetry coupling `W_l`'s rows to `W_{l+1}`'s columns (weight-space /
+   NFN-style symmetry). §8.2/§8.4 already fixed the feature space: **`flatten(W_l)` is the wrong
+   basis** — rotation-invariant magnitude is **inert** (the spectrum by the §8.2 argument;
+   empirically the column norm, corr 0.00, §8.3); the signal is **basis-aligned** (singular
+   *vectors* / per-neuron column alignment with the propagated moments).
+   So encode each layer with a permutation-**equivariant**, basis-aligned per-neuron encoder
+   (Deep Sets / attention over neurons) — *not* a flatten, *not* a rotation-invariant or
+   permutation-*invariant* pool.
+3. **Structured moment / particle recurrence** — a hidden state that *is* the
+   activation moments, or `m` learned latent "particles" propagated through the
+   *real* `W_l` (a learned, depth-adaptive UT that uses `W` directly). The
+   dynamical-systems-native model; a clean result here is interesting regardless
+   of the leaderboard. (Feeding UT moments as features, above, is the cheap proxy for this.)
+
+### 10.1 The equivariant model, in linear-algebra form (the concrete Rung-1/2 build)
+
+ReLU commutes with permutation matrices but not general orthogonal ones (§8.2), so
+the only residual symmetry after fixing the standard basis is `W_l ↦ P_l W_l P_{l-1}ᵀ`
+(P permutation), under which `μ_l ↦ P_l μ_l`. (Full orthogonal invariance would leave
+only the singular values `Σ` — inert, §8.3. We keep the basis-aligned part: the singular
+*vectors'* standard-basis coordinates.) Build a model equivariant to exactly that:
+
+- **State `H ∈ R^{d×c}`** — a matrix co-transforming with the activation vector
+  (`H ↦ P_l H`); its `c` columns are `c` probe-vectors in the layer's coordinate space.
+- **Transition = the real weights as the step-`l` operator** (no flattening): propagate
+  `M1 = W_l H` (mean) and `M2 = W_l^{∘2} H` (variance; `∘2` = entrywise square), then a
+  **shared row-wise cell** (a GRU/LSTMCell applied to each row of `[M1 | M2 | UT_l]`, tied
+  across rows) → `H_l`. A Deep-Sets column-mean `g = 1_dᵀX/d` (row-permutation-invariant,
+  = the mean-field order parameters `m_l,q_l`) is broadcast back as `1_d g`.
+- **Readout `F̂ = H_K w`** (`w ∈ R^c`).
+
+Equivariance is one line (P orthogonal, `PᵀP=I`): `W_l H ↦ (P_l W_l P_{l-1}ᵀ)(P_{l-1}H) =
+P_l(W_l H)`; row-maps and column-means commute with P. **Cost `O(K d² c)`** (the `W_l H`
+products — the net's own forward-pass order); **learned params `O(c²)`, INDEPENDENT of width
+`d`** — so it should not hit the flat-LSTM's `d²`-token data wall (the width-32 stall, §10).
+It is the LSTM with its vector state promoted to the matrix `H` and its learned input
+projection replaced by left-multiplication by `W_l`. The columns of `H` are *learned probe
+vectors* (UT's fixed sigma points made learnable); the hybrid `G(W,UT)` enters by stacking
+the per-coordinate UT moments `UT_l` into the row inputs. Custom cell — a NEW model class,
+not a `make_core` swap in `rnn_harness.py`. Monarch composes on `c` or the row-mixing.
+
+### 10.2 The Deep-Sets pool, in linear algebra (not an add-on — the other allowed operator)
+
+Which linear maps on the row index commute with `X ↦ PX` (P permutation)? The commutant of
+the `S_d` permutation representation on `R^d` is only **2-dimensional: `span{I, 11ᵀ}`** (Schur:
+`R^d` = trivial irrep `span(1)` ⊕ standard irrep `1^⊥`, so an equivariant operator is one scalar
+per block, `aI + b·11ᵀ`). Hence the most general equivariant linear layer is
+`L(X) = XΛ + (1/d)11ᵀX·Γ + 1βᵀ` — "mix each row identically" (`I`) **plus** "mean-pool rows and
+broadcast back" (`11ᵀ`). **The pool IS the second allowed operator; omitting it discards half the
+equivariant linear space.**
+
+`P_sym = 11ᵀ/d` is the rank-1 orthogonal projector onto `span(1)`; the split `R^d = span(1) ⊕ 1^⊥`
+simultaneously diagonalizes every equivariant operator (eigenvalue `a+bd` on `1`, `a` on `1^⊥`).
+The two blocks are exactly the two physical scales of §8.1: **`P_sym H` = the mean-field order
+parameters** (`m_l = 1ᵀμ_l/d`; with a 2nd-moment pool, `q_l = ‖z_l‖²/d`, recursion
+`q_{l+1}=½σ²q_l`, `m_{l+1}=√(σ²q_l/2π)`), and **`(I−P_sym)H` = the fluctuation** where the
+realization signal lives (`F = 0.564 universal + O(1/√d) fluctuation`). So: **pool = order-parameter
+channel, rows = fluctuation channel.** Linear-only gives just the mean; include a 2nd-moment pool
+`1ᵀX^{∘2}/d` (the `q` order parameter, don't make the nonlinearity reconstruct it) and let the
+row-cell `Φ` build higher invariants. Self-attention among rows = the same object with the fixed
+`11ᵀ/d` replaced by a learned input-dependent row-coupling; likely overkill here since §8.1 says the
+global coupling runs through order parameters (symmetric-subspace scalars), not pairwise structure.
+Default was **mean + 2nd-moment pool** — but the §10 sweep **overturned this**: mean-pool ALONE won
+(2nd-moment pool neutral for the residual cell, harmful for gru; attention worse). The row-cell
+reconstructs `q_l` from the mean channel, so forcing it as an explicit feature only adds noise —
+the §8.1 "`q_l` must be an explicit feature" intuition was wrong. **Use mean-pool.**
+
+**Status.** TeamChaotic ≈ #82 with plain randomized UT; leaderboard top ≈3e-8 is
+pure quadrature at the 0.1-pinned multiplier — the boring frontier. The bet here
+is scientific (dynamical systems), not leaderboard-chasing.
